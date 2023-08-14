@@ -21,6 +21,7 @@
 
 (define-module (gnu machine digital-ocean)
   #:use-module (gnu machine ssh)
+  #:use-module (gnu)
   #:use-module (gnu machine)
   #:use-module (gnu services)
   #:use-module (gnu services base)
@@ -69,6 +70,9 @@
 ;;; from the Digital Ocean virtual private server (VPS) service.
 ;;;
 ;;; Code:
+
+(use-service-modules networking ssh)
+(use-package-modules bootloaders)
 
 (define %api-base "https://api.digitalocean.com")
 
@@ -203,12 +207,10 @@ an environment type of 'digital-ocean-environment-type'."
 
 ;; The following script was adapted from the guide available at
 ;; <https://wiki.pantherx.org/Installation-digital-ocean/>.
-(define (guix-infect network)
-  "Given NETWORK, an alist describing the Droplet's public IPv4 network
-interface, return a Bash script that will install the Guix system."
+(define (simple-guix-infect network)
   (define os
     `(operating-system
-       (host-name "gnu-bootstrap")
+       (host-name "vm")
        (timezone "Etc/UTC")
        (bootloader (bootloader-configuration
                     (bootloader grub-bootloader)
@@ -244,40 +246,16 @@ interface, return a Bash script that will install the Guix system."
                                (openssh-configuration
                                 (log-level 'debug)
                                 (permit-root-login 'prohibit-password))))
-            %base-services))))
+                %base-services))))
   (format #f "#!/bin/bash
-
 apt-get update
 apt-get install xz-utils -y
-wget -nv https://ci.guix.gnu.org/search/latest/archive?query=spec:tarball+status:success+system:x86_64-linux+guix-binary.tar.xz -O guix-binary-nightly.x86_64-linux.tar.xz
 cd /tmp
-tar --warning=no-timestamp -xf ~~/guix-binary-nightly.x86_64-linux.tar.xz
-mv var/guix /var/ && mv gnu /
-mkdir -p ~~root/.config/guix
-ln -sf /var/guix/profiles/per-user/root/current-guix ~~root/.config/guix/current
-export GUIX_PROFILE=\"`echo ~~root`/.config/guix/current\" ;
-source $GUIX_PROFILE/etc/profile
-groupadd --system guixbuild
-for i in `seq -w 1 10`; do
-   useradd -g guixbuild -G guixbuild         \
-           -d /var/empty -s `which nologin`  \
-           -c \"Guix build user $i\" --system  \
-           guixbuilder$i;
-done;
-cp ~~root/.config/guix/current/lib/systemd/system/guix-daemon.service /etc/systemd/system/
-systemctl start guix-daemon && systemctl enable guix-daemon
-mkdir -p /usr/local/bin
-cd /usr/local/bin
-ln -s /var/guix/profiles/per-user/root/current-guix/bin/guix
-mkdir -p /usr/local/share/info
-cd /usr/local/share/info
-for i in /var/guix/profiles/per-user/root/current-guix/share/info/*; do
-    ln -s $i;
-done
-guix archive --authorize < ~~root/.config/guix/current/share/guix/ci.guix.gnu.org.pub
-# guix pull
-guix package -i glibc-utf8-locales
-export GUIX_LOCPATH=\"$HOME/.guix-profile/lib/locale\"
+wget https://git.savannah.gnu.org/cgit/guix.git/plain/etc/guix-install.sh
+chmod +x guix-install.sh
+yes '' | ./guix-install.sh
+guix pull
+guix package -i glibc-utf8-locales-2.29
 guix package -i openssl
 cat > /etc/bootstrap-config.scm << EOF
 (use-modules (gnu))
@@ -285,15 +263,16 @@ cat > /etc/bootstrap-config.scm << EOF
 
 ~a
 EOF
-# guix pull
 guix system build /etc/bootstrap-config.scm
 guix system reconfigure /etc/bootstrap-config.scm
 mv /etc /old-etc
 mkdir /etc
 cp -r /old-etc/{passwd,group,shadow,gshadow,mtab,guix,bootstrap-config.scm} /etc/
-guix system reconfigure /etc/bootstrap-config.scm"
-          ;; Escape the bare backtick to avoid having it interpreted by Bash.
-          (string-replace-substring
+guix system reconfigure /etc/bootstrap-config.scm
+echo 'Installation complete'
+reboot
+"
+         (string-replace-substring
            (format #f "~y" os) "`" "\\`")))
 
 (define (machine-wait-until-available machine)
@@ -317,6 +296,7 @@ named DROPLET-NAME."
       (lambda ()
         (open-ssh-session address #:user "root" #:identity ssh-key))
       (lambda args
+        (display "SSH connection not ready, sleeping for 5 seconds then retrying...\n")
         (sleep 5)
         (loop)))))
 
@@ -364,7 +344,7 @@ environment type of 'digital-ocean-environment-type'."
          (request-body `(("name" . ,name)
                          ("region" . ,region)
                          ("size" . ,size)
-                         ("image" . "debian-9-x64")
+                         ("image" . "debian-10-x64")
                          ("ssh_keys" . ,(vector fingerprint))
                          ("backups" . #f)
                          ("ipv6" . ,enable-ipv6?)
@@ -372,21 +352,29 @@ environment type of 'digital-ocean-environment-type'."
                          ("private_networking" . #nil)
                          ("volumes" . #nil)
                          ("tags" . ,(list->vector tags))))
+         (ignored (display "Creating droplet...\n"))
          (response (post-endpoint "/v2/droplets" request-body)))
+    (display "Waiting for droplet to become available...\n")
     (machine-wait-until-available target)
     (let* ((network (machine-public-ipv4-network target))
            (address (assoc-ref network "ip_address")))
+      (display "Waiting for droplet SSH to become available...\n")
       (wait-for-ssh address ssh-key)
       (let* ((ssh-session (open-ssh-session address #:user "root" #:identity ssh-key))
              (sftp-session (make-sftp-session ssh-session)))
+        (display "Uploading guix infect script...\n")
         (call-with-remote-output-file sftp-session "/tmp/guix-infect.sh"
                                       (lambda (port)
-                                        (display (guix-infect network) port)))
-        (rexec ssh-session "/bin/bash /tmp/guix-infect.sh")
+                                        (display (simple-guix-infect network) port)))
+        (display "Executing guix infect script...\n")
         ;; Session will close upon rebooting, which will raise 'guile-ssh-error.
         (catch 'guile-ssh-error
-          (lambda () (rexec ssh-session "reboot"))
+          (lambda () (rexec ssh-session "/bin/bash /tmp/guix-infect.sh &>> /tmp/progress.log"))
           (lambda args #t)))
+      (display "Guix infect completed. Rebooting droplet...\n")
+      ;; (display "Sleeping for 1 minute to allow reboot to complete...\n")
+      ;; (sleep 60)
+      (display "Wait for droplet SSH after reboot...\n")
       (wait-for-ssh address ssh-key)
       (let ((delegate (machine
                        (operating-system (add-static-networking target network))
@@ -396,6 +384,7 @@ environment type of 'digital-ocean-environment-type'."
                          (host-name address)
                          (identity ssh-key)
                          (system "x86_64-linux"))))))
+        (display "Deploying guix local to remote...\n")
         (deploy-machine delegate)))))
 
 
