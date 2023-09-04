@@ -257,6 +257,7 @@ yes '' | ./guix-install.sh
 guix pull
 guix package -i glibc-utf8-locales-2.29
 guix package -i openssl
+guix package -i nss-certs
 cat > /etc/bootstrap-config.scm << EOF
 (use-modules (gnu))
 (use-service-modules base networking ssh)
