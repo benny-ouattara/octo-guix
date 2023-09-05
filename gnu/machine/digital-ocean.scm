@@ -251,11 +251,13 @@ an environment type of 'digital-ocean-environment-type'."
   (format #f "#!/bin/bash
 apt-get update
 apt-get install xz-utils -y
+apt-get install openssl -y
+apt-get install nss -y
 cd /tmp
 wget https://git.savannah.gnu.org/cgit/guix.git/plain/etc/guix-install.sh
 chmod +x guix-install.sh
 yes '' | ./guix-install.sh
-guix pull
+guix pull --url=https://github.com/benny-ouattara/octo-guix.git --disable-authentication --allow-downgrades
 guix package -i glibc-utf8-locales-2.29
 guix package -i openssl
 cat > /etc/bootstrap-config.scm << EOF
@@ -269,7 +271,7 @@ guix system reconfigure /etc/bootstrap-config.scm
 mv /etc /old-etc
 mkdir /etc
 cp -r /old-etc/{passwd,group,shadow,gshadow,mtab,guix,bootstrap-config.scm} /etc/
-guix system reconfigure /etc/bootstrap-config.scm
+guix system reconfigure /etc/bootstrap-config.scm --allow-downgrades
 echo 'Installation complete'
 reboot
 "
