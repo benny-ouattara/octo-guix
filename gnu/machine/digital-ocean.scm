@@ -221,6 +221,7 @@ an environment type of 'digital-ocean-environment-type'."
                              (device "/dev/vda1")
                              (type "ext4"))
                            %base-file-systems))
+       (packages (list (specification->package "nss-certs")))
        (services
         (append (list (service static-networking-service-type
                                (list (static-networking
@@ -257,7 +258,6 @@ yes '' | ./guix-install.sh
 guix pull
 guix package -i glibc-utf8-locales-2.29
 guix package -i openssl
-guix package -i nss-certs
 cat > /etc/bootstrap-config.scm << EOF
 (use-modules (gnu))
 (use-service-modules base networking ssh)
